@@ -7,9 +7,8 @@ from app.services.common import (
     audit,
     get_release,
     now_str,
-    set_app_env_version,
-    upsert_instance,
 )
+from app.services.versioning import recompute_gap, register_heartbeat, write_registry_version
 
 router = APIRouter(tags=["回滚"])
 
@@ -39,9 +38,16 @@ def rollback(release_id: int, body: RollbackIn):
             """,
             (now, body.目标版本, release_id),
         )
-        set_app_env_version(conn, r["app_id"], r["current_env_id"], body.目标版本)
-        upsert_instance(conn, r["app_id"], r["current_env_id"], body.目标版本, "探针绿", release_id)
-        # 旧版本实例标红，便于对账发现残留
+        # 回滚同样经名册唯一写口落真源，实例登记走心跳通道，同事务同命运
+        write_registry_version(
+            conn, r["app_id"], r["current_env_id"], body.目标版本,
+            expected_release_id=None,
+        )
+        register_heartbeat(
+            conn, r["app_id"], r["current_env_id"], body.目标版本, "探针绿",
+            release_id, instance_key="主实例", source="回滚登记",
+        )
+        # 旧版本实例标红，便于对账发现残留（残留治理另立；此处只保证缺口可见）
         conn.execute(
             """
             UPDATE instances SET health='探针红', updated_at=?
@@ -49,5 +55,6 @@ def rollback(release_id: int, body: RollbackIn):
             """,
             (now, r["app_id"], r["current_env_id"], body.目标版本, release_id),
         )
+        recompute_gap(conn, r["app_id"], r["current_env_id"])
         audit(conn, "回滚", release_id, f"回滚到{body.目标版本}", body.备注)
         return row_to_dict(get_release(conn, release_id))

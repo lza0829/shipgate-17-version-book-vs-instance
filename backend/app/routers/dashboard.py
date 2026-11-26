@@ -1,7 +1,8 @@
 from __future__ import annotations
 from fastapi import APIRouter
-from app.db import db, rows_to_list, row_to_dict
+from app.db import db, rows_to_list
 from app.services.common import RELEASE_SELECT
+from app.services.versioning import all_cells
 
 router = APIRouter(tags=["总览"])
 
@@ -20,18 +21,27 @@ def overview():
                 + " WHERE r.status IN ('已入闸','晋升中','已放行','回滚中') ORDER BY r.id DESC"
             ).fetchall()
         )
-        versions = rows_to_list(
-            conn.execute(
-                """
-                SELECT a.name AS 应用, e.code AS 环境, e.name AS 环境名,
-                       v.version AS 版本, v.updated_at AS 更新时间
-                FROM app_env_versions v
-                JOIN apps a ON a.id = v.app_id
-                JOIN environments e ON e.id = v.env_id
-                ORDER BY a.id, e.sort_order
-                """
-            ).fetchall()
-        )
+        # 环境版本读侧按真源重放：版本=名册，实例只作附件，不一致看缺口标
+        cells = all_cells(conn)
+        versions = [
+            {
+                "应用": c["应用"],
+                "应用编号": c["应用编号"],
+                "环境": c["环境"],
+                "环境编号": c["环境编号"],
+                "环境名": c["环境名"],
+                "版本": c["名册版本"],
+                "名册版本": c["名册版本"],
+                "实例汇总版本": c["实例汇总版本"],
+                "实例数": c["实例数"],
+                "缺口类型": c["缺口类型"],
+                "缺口状态": c["缺口状态"],
+                "缺口说明": c["缺口说明"],
+                "更新时间": c["版本更新时间"],
+                "最近心跳": c["最近心跳"],
+            }
+            for c in cells
+        ]
         health = rows_to_list(
             conn.execute(
                 """
@@ -44,4 +54,15 @@ def overview():
                 """
             ).fetchall()
         )
-        return {"分布": counts, "在途": active, "环境版本": versions, "实例": health}
+        open_gaps = [c for c in cells if c["缺口状态"]]
+        gap_counts = {}
+        for c in open_gaps:
+            gap_counts[c["缺口类型"]] = gap_counts.get(c["缺口类型"], 0) + 1
+        return {
+            "分布": counts,
+            "在途": active,
+            "环境版本": versions,
+            "实例": health,
+            "缺口数": len(open_gaps),
+            "缺口分类": gap_counts,
+        }

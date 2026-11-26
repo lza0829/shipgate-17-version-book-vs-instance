@@ -10,9 +10,8 @@ from app.services.common import (
     get_setting,
     now_str,
     ordered_envs,
-    set_app_env_version,
-    upsert_instance,
 )
+from app.services.versioning import register_heartbeat, write_registry_version
 
 router = APIRouter(tags=["晋升"])
 
@@ -73,7 +72,15 @@ def promote(release_id: int, body: PromoteIn):
             """,
             (new_status, to_env["id"], released_at, release_id),
         )
-        set_app_env_version(conn, r["app_id"], to_env["id"], r["target_version"])
-        upsert_instance(conn, r["app_id"], to_env["id"], r["target_version"], "探针绿", release_id)
+        # 同事务同命运：先写名册真源（带预期发版单），再登记实例探活附件。
+        # 任一步失败整体回滚，不会出现名册已改而实例缺账的半截状态。
+        write_registry_version(
+            conn, r["app_id"], to_env["id"], r["target_version"],
+            expected_release_id=release_id,
+        )
+        register_heartbeat(
+            conn, r["app_id"], to_env["id"], r["target_version"], "探针绿",
+            release_id, instance_key="主实例", source="晋升登记",
+        )
         audit(conn, "晋升", release_id, f"晋升到{body.目标环境}", body.备注)
         return row_to_dict(get_release(conn, release_id))

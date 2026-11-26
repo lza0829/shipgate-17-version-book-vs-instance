@@ -2,7 +2,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from app.db import db, init_db
-from app.services.common import audit, now_str, set_app_env_version, upsert_instance
+from app.services.common import audit, now_str
+from app.services.versioning import recompute_gap
 
 
 def seed_if_empty() -> None:
@@ -29,8 +30,29 @@ def seed_if_empty() -> None:
             (app2, {"测": "0.9.1", "预": "0.9.0", "产": "0.8.5"}),
         ):
             for code, ver in vers.items():
-                set_app_env_version(conn, aid, envs[code], ver)
-                upsert_instance(conn, aid, envs[code], ver, "探针绿", None)
+                # 种子直接落账：名册（真源）与实例（附件）一致，最后统一重算缺口
+                conn.execute(
+                    """
+                    INSERT INTO app_env_versions(app_id, env_id, version, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (aid, envs[code], ver, now),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO instances(app_id, env_id, instance_key, version, health, updated_at)
+                    VALUES (?, ?, '主实例', ?, '探针绿', ?)
+                    """,
+                    (aid, envs[code], ver, now),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO instance_heartbeats(app_id, env_id, instance_key, version,
+                                                    health, source, created_at)
+                    VALUES (?, ?, '主实例', ?, '探针绿', '种子初始化', ?)
+                    """,
+                    (aid, envs[code], ver, now),
+                )
 
         open_at = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         close_at = (datetime.now() + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
@@ -73,6 +95,27 @@ def seed_if_empty() -> None:
             ),
         )
         rid = conn.execute("SELECT id FROM releases ORDER BY id DESC LIMIT 1").fetchone()["id"]
-        upsert_instance(conn, app, envs["测"], "1.3.0", "探针绿", rid)
-        set_app_env_version(conn, app, envs["测"], "1.3.0")
+        # 测试环境名册与实例一起到 1.3.0，发版单即预期真源
+        conn.execute(
+            "UPDATE app_env_versions SET version='1.3.0', updated_at=?, expected_release_id=? "
+            "WHERE app_id=? AND env_id=?",
+            (now, rid, app, envs["测"]),
+        )
+        conn.execute(
+            "UPDATE instances SET version='1.3.0', release_id=?, updated_at=? "
+            "WHERE app_id=? AND env_id=? AND instance_key='主实例'",
+            (rid, now, app, envs["测"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO instance_heartbeats(app_id, env_id, instance_key, version,
+                                            health, release_id, source, created_at)
+            VALUES (?, ?, '主实例', '1.3.0', '探针绿', ?, '种子初始化', ?)
+            """,
+            (app, envs["测"], rid, now),
+        )
+        # 统一重算：种子账实相符，不产生开口缺口
+        for aid in (app, app2):
+            for env_id in envs.values():
+                recompute_gap(conn, aid, env_id)
         audit(conn, "系统", None, "种子初始化", "发版闸")

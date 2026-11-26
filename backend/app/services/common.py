@@ -49,6 +49,9 @@ SELECT r.id AS 编号,
        r.current_env_id AS 当前环境编号,
        e.code AS 当前环境,
        e.name AS 当前环境名,
+       v.version AS 当前环境名册版本,
+       g.gap_kind AS 当前环境缺口类型,
+       CASE WHEN g.status IN ('已闭合','已纠正') THEN NULL ELSE g.status END AS 当前环境缺口状态,
        r.canary_ratio AS 金丝雀比例,
        r.note AS 备注,
        r.created_at AS 申请时间,
@@ -58,6 +61,8 @@ SELECT r.id AS 编号,
 FROM releases r
 JOIN apps a ON a.id = r.app_id
 LEFT JOIN environments e ON e.id = r.current_env_id
+LEFT JOIN app_env_versions v ON v.app_id = r.app_id AND v.env_id = r.current_env_id
+LEFT JOIN version_gaps g ON g.app_id = r.app_id AND g.env_id = r.current_env_id
 """
 
 
@@ -106,37 +111,6 @@ def active_rollback_window(conn, env_id: int):
         """,
         (env_id,),
     ).fetchone()
-
-
-def set_app_env_version(conn, app_id: int, env_id: int, version: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO app_env_versions(app_id, env_id, version, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(app_id, env_id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at
-        """,
-        (app_id, env_id, version, now_str()),
-    )
-
-
-def upsert_instance(conn, app_id: int, env_id: int, version: str, health: str, release_id: int | None) -> None:
-    row = conn.execute(
-        "SELECT id FROM instances WHERE app_id=? AND env_id=? AND version=?",
-        (app_id, env_id, version),
-    ).fetchone()
-    if row:
-        conn.execute(
-            "UPDATE instances SET health=?, release_id=?, updated_at=? WHERE id=?",
-            (health, release_id, now_str(), row["id"]),
-        )
-    else:
-        conn.execute(
-            """
-            INSERT INTO instances(app_id, env_id, version, health, release_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (app_id, env_id, version, health, release_id, now_str()),
-        )
 
 
 def assert_app_enabled(conn, app_id: int):
